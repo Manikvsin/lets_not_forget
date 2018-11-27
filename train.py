@@ -5,7 +5,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torch.autograd import Variable
 from torchvision import models,utils,datasets,transforms
-from tiny_image_net_torch import TinyImageNet
+from main_model import ewc_MLP
 import numpy as np
 import pickle
 from collections import OrderedDict
@@ -15,151 +15,197 @@ import os
 import matplotlib.pyplot as plt
 import argparse
 
-# Create an ArgumentParser object which will obtain arguments from command line
-parser = argparse.ArgumentParser(description="Fine-tunes a pre-trained AlexNet model, given a path to the tiny image dataset and a path where to save the model after training")
-parser.add_argument('--data', type=str, help='path to directory where tiny imagenet dataset is present')
-parser.add_argument('--save', type=str, help='path to directory to save trained model after completion of training')
-args = parser.parse_args()
+save_path = "EWC_MLP_models"
 
-data_path = args.data
-save_path = args.save
+def get_labels_indices(target, label):
+    label_indices = []
 
-def progress_bar(i, epochs, train_error, val_error, accuracy,top5): 
-    print("\r[{}{}] Loss's Training:{:.6f} Validation:{:.6f} Accuracy:{:2.2f} top5: {:2.2f}".format("="*i, " "*(epochs - i), train_error, val_error, accuracy, top5), end='')
+    for i in range(len(target)):
+        if (target[i] in label):
+            label_indices.append(i)
 
-class ft_Alexnet(object):
+    return label_indices
+
+def progress_bar(i, epochs, train_error, val_error, ewc_error_log, accuracy): 
+    print("\r[{}{}] Epoch Num {} Loss's Training:{:.6f} Validation:{:.6f} EWC:{:.6f} Accuracy:{:2.2f}".format("="*i, " "*(epochs - i), i, train_error, val_error, ewc_error_log, accuracy), end='')
+
+class EWC_train(object):
     def __init__(self):
-        self.use_gpu = torch.cuda.is_available()
-        if self.use_gpu:
-            print("HEYYY CUDAAAA")
-        #get batch sizes
-        self.train_batch = 100
-        self.val_batch = 100
-        self.output_size = 200
-        self.epochs = 50
+        #self.use_gpu = torch.cuda.is_available()
+        #if self.use_gpu:
+        #    print("HEYYY CUDAAAA")
+        self.use_gpu = False
+        #set some hyperparams
+        self.train_batch = 10
+        self.val_batch = 10
+        self.lamda = 5
+        #IO size
+        self.rows = 28
+        self.cols = 28
+        self.input_size = self.rows*self.cols
+        self.output_size = 10
+        #epochs number
+        self.epochs = 60
+        #some logging facilities
         self.start_epoch = 0
         self.best_accuracy = 0
         self.accuracy = 0
-        self.computation_time_dictionary = {}
-        self.inference_time_dictionary = {}
         self.accuracy_dictionary = {}
-        self.top5_dictionary = {}
         self.train_error_dictionary = {}
+        #self.ewc_train_error = {}
         self.validation_error_dictionary = {}
-        #get pretrained model
-        self.model = models.alexnet(pretrained=True)
-        for i in self.model.parameters():
-            i.requires_grad=False
-        self.model.classifier[6] = nn.Linear(in_features=4096,out_features=self.output_size,bias=True)
-        if self.use_gpu:
-            self.model.cuda()
+        #create model
+        self.layer_sizes = [self.input_size, 512,128,32,self.output_size] 
+        self.model = ewc_MLP(self.layer_sizes, dropout=False)
+        print(self.model)
         self.criterion = nn.CrossEntropyLoss()
-        self.opt = optim.SGD(self.model.parameters(), lr=0.001, momentum=0.9)
-        self.scheduler = torch.optim.lr_scheduler.MultiStepLR(self.opt, milestones=[10, 40], gamma=0.1)
+        self.opt = optim.SGD(self.model.parameters(), lr=0.05)
+        #self.scheduler = torch.optim.lr_scheduler.MultiStepLR(self.opt, milestones=[10, 40], gamma=0.1)
 
         #create dataloader
         data_transforms = {
             'train': transforms.Compose([
-                transforms.RandomResizedCrop(224),
-                transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
-                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
             ]),
             'val': transforms.Compose([
-                transforms.Resize(256),
-                transforms.CenterCrop(224),
                 transforms.ToTensor(),
-                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
             ]),
         }
-        self.train_data = TinyImageNet(root=data_path, train=True, transform=data_transforms['train'])
-        self.val_data = TinyImageNet(root=data_path, train=False, transform = data_transforms['val'])
-
-        self.train_loader = DataLoader(self.train_data, batch_size=self.train_batch, shuffle=True)
-        self.val_loader = DataLoader(self.val_data, batch_size=self.val_batch, shuffle=True)
+        self.og_train_data = datasets.MNIST("MNIST_data", download=True, train=True, transform = data_transforms['train'])
+        self.og_val_data = datasets.MNIST("MNIST_data", download=True, train=False, transform = data_transforms['val'])
+        self.train_loader = DataLoader(self.og_train_data, batch_size=self.train_batch, shuffle=True)
+        self.val_loader = DataLoader(self.og_val_data, batch_size=self.val_batch, shuffle=True)
     
-    def train(self, save_model_file=os.path.join(save_path, "finetuned_alexnet.pt")):
-        def onehot_encoding(labels, batch_size):
-            onehot_labels = torch.zeros(batch_size, self.output_size)
-            for i in range(batch_size):
-                onehot_labels[i][labels[i]] = 1
-            return onehot_labels
-
-        for i in range(self.start_epoch + 1, self.epochs + 1):
+    def train(self, save_model_file=os.path.join(save_path, "finetuned_alexnet.pt"), save_all=False):
+        for i in range(self.start_epoch + 1, self.epoch + 1):
             train_error = 0
+            ewc_t = 0
             validation_error = 0
             num_correct = 0
-            top5_correct = 0
-            start_time = time.time()
             self.model.train()
             for batch, (data, label) in enumerate(self.train_loader):
                 if self.use_gpu:
                     input_data, g_label = Variable(data.cuda()), Variable(label.cuda())
                 else:
                     input_data, g_label = Variable(data), Variable(label)
-
                 self.opt.zero_grad()
-                output_vector = self.model(input_data)
+                try:
+                    output_vector = self.model(input_data.view(self.train_batch, self.input_size))
+                except:
+                    output_vector = self.model(input_data.view(input_data.size()[0], self.input_size))
                 batch_error = self.criterion(output_vector, g_label)
-                #if (batch == 1):
-                #    print(batch_error)
-                train_error += batch_error.item()
-                batch_error.backward()
+                ewc_error = self.model.get_ewc_loss(self.lamda)
+                final_error = batch_error + ewc_error
+                train_error += final_error.item()
+                ewc_t += ewc_error.item()
+                final_error.backward()
                 self.opt.step()
-            self.computation_time_dictionary[i] = time.time() - start_time
 
             self.model.eval()
-            infer_time = time.time()
             for batch,(v_data,v_label) in enumerate(self.val_loader):
                 input_data, g_label = Variable(v_data), Variable(v_label)
                 if self.use_gpu:
                     input_data, g_label = Variable(v_data.cuda()), Variable(v_label.cuda())
                 else:
                     input_data, g_label = Variable(v_data), Variable(v_label)
-                output_vector = self.model(input_data)
+                try:
+                    output_vector = self.model(input_data.view(self.train_batch, self.input_size))
+                except:
+                    output_vector = self.model(input_data.view(input_data.size()[0], self.input_size))
                 val_error = self.criterion(output_vector, g_label)
-                #if (batch == 1):
-                #    print(val_error)
                 validation_error += val_error.item()
                 dummy, predicted_output = torch.max(output_vector, 1)
-                dummy, predicted_top5 = torch.topk(output_vector, 5, dim=1)
-                for j in range(self.val_batch):
-                    if (predicted_output[j].item() == v_label[j]):
-                        num_correct += 1
-                    top5_list = [tens.item() for tens in predicted_top5[j]]
-                    if (v_label[j] in top5_list):
-                        top5_correct += 1
-            self.inference_time_dictionary[i] = time.time() - infer_time
+                try:
+                    for j in range(self.val_batch):
+                        if (predicted_output[j].item() == v_label[j]):
+                            num_correct += 1
+                except:
+                    for j in range(predicted_output.size()[0]):
+                        if (predicted_output[j].item() == v_label[j]):
+                            num_correct += 1
 
-            accuracy = (100.0 * num_correct) / len(self.val_loader.dataset)
-            top5_accuracy = (100.0 * top5_correct) / len(self.val_loader.dataset)
-            train_error = (1.0 * train_error) / len(self.train_loader.dataset)
-            validation_error = (1.0 * validation_error) / len(self.val_loader.dataset)
-            progress_bar(i, self.epochs, train_error, val_error, accuracy, top5_accuracy)
+            accuracy = (100.0 * num_correct) / (self.val_data_size)
+            train_error = (1.0 * train_error) / (self.train_data_size)
+            ewc_t = (1.0 * ewc_t) / (self.train_data_size)
+            validation_error = (1.0 * validation_error) / (self.val_data_size)
+            progress_bar(i, self.epochs, train_error, val_error, ewc_t, accuracy)
             #record stat
             self.accuracy_dictionary[i] = accuracy
-            self.top5_dictionary[i] = top5_accuracy
             self.accuracy = accuracy
             self.train_error_dictionary[i] = train_error
+            #self.ewc_train_error[i] = ewc_t
             self.validation_error_dictionary[i] = validation_error
             if accuracy > self.best_accuracy : 
                 self.best_accuracy = accuracy
                 self.better = 1
             if (save_model_file != None):
-                if (self.better == 1):
-                    model_dict = {'epoch' : i,
-                                'optimizer_dict':self.opt.state_dict(),
-                                'state_dict':self.model.state_dict(),
-                                'class_to_label': self.train_data.class_to_label,
-                                'idx_to_class': self.train_data.tgt_idx_to_class}
-                    best_model_file = save_model_file
+                model_dict = {'epoch' : i,
+                        'optimizer_dict':self.opt.state_dict(),
+                        'state_dict':self.model.state_dict()}
+                best_model_file = save_model_file
+                if (save_all):
                     torch.save(model_dict, best_model_file)
                     self.better = 0
- 
+                elif (self.better == 1):
+                    torch.save(model_dict, best_model_file)
+                    self.better = 0
+    def make_dataloaders(self, train_nums, val_nums):
+        train_idxs = get_labels_indices(self.og_train_data.train_labels, train_nums)
+        self.train_data_size = len(train_idxs)
+        self.train_loader =DataLoader(self.og_train_data, batch_size=self.train_batch, sampler=torch.utils.data.sampler.SubsetRandomSampler(train_idxs))
+        
+        val_idxs = get_labels_indices(self.og_val_data.test_labels, val_nums)
+        self.val_data_size = len(val_idxs)
+        self.val_loader = DataLoader(self.og_val_data, batch_size=self.val_batch, sampler=torch.utils.data.sampler.SubsetRandomSampler(val_idxs))
+
+
+    def run_experiments(self, exp_num):
+        if (exp_num == 0):
+            self.start_epoch = 0
+            self.epoch = 60
+            self.make_dataloaders(range(10), range(10))
+            self.train(save_model_file = os.path.join(save_path, "OG_MLP.pt"))
+        elif (exp_num == 1):
+            #do 0 - 3, 4 - 6, 7 - 9
+            self.start_epoch = 0
+            self.epoch = 20
+            self.make_dataloaders(train_nums = [0,1,2,3], val_nums = [0,1,2,3])
+            self.train(save_model_file = os.path.join(save_path, "EWC_MLP_03.pt"), save_all = True)
+            #4-6
+            self.start_epoch = 20
+            self.epoch = 40
+            self.make_dataloaders(train_nums = [4,5,6], val_nums = [0,1,2,3,4,5,6])
+            self.train(save_model_file = os.path.join(save_path, "EWC_MLP_06.pt"), save_all =True)
+            #7-9
+            self.start_epoch = 40
+            self.epoch = 60
+            self.make_dataloaders(train_nums = [7,8,9], val_nums = [0,1,2,3,4,5,6,7,8,9])
+            self.train(save_model_file = os.path.join(save_path, "EWC_MLP_09.pt"), save_all=True)
+        elif (exp_num == 2):
+            #do 0 - 3, 4 - 6, 7 - 9
+            self.start_epoch = 0
+            self.epoch = 20
+            self.make_dataloaders(train_nums = [0,1,2,3], val_nums = [0,1,2,3])
+            self.train(save_model_file = os.path.join(save_path, "EWC_MLP_03.pt"))
+            self.model.make_fisher_matrix(self.og_train_data, self.train_batch, prev_nums=[0,1,2,3])
+            #4-6
+            self.start_epoch = 20
+            self.epoch = 40
+            self.make_dataloaders(train_nums = [4,5,6], val_nums = [0,1,2,3,4,5,6])
+            self.train(save_model_file = os.path.join(save_path, "EWC_MLP_06.pt"))
+            self.model.make_fisher_matrix(self.og_train_data, self.train_batch, prev_nums=[0,1,2,3,4,5,6])
+            #7-9
+            self.start_epoch = 40
+            self.epoch = 60
+            self.make_dataloaders(train_nums = [7,8,9], val_nums = [0,1,2,3,4,5,6,7,8,9])
+            self.train(save_model_file = os.path.join(save_path, "EWC_MLP_09.pt"))
+        
+
+        
 
 if __name__ == '__main__':
-    a = ft_Alexnet()
-    a.train()
+    a = EWC_train()
+    a.run_experiments(2)
     print("\n Finished")
     #train_error_dict = a.train_error_dictionary
     #val_error_dict = a.validation_error_dictionary
@@ -167,8 +213,8 @@ if __name__ == '__main__':
     #comp_time_dict = a.computation_time_dictionary
     #inf_tim_dict = a.inference_time_dictionary
     #top5_dict = a.top5_dictionary
-    my_ft_dicts = [train_error_dict, val_error_dict, accuracy_dict, comp_time_dict, inf_tim_dict, top5_dict]
-    pickle.dump(my_ft_dicts, open("FT_Alexnet_dicts__top5_cuda.pkl", "wb"))
+    my_ft_dicts = [a.train_error_dictionary, a.validation_error_dictionary, a.accuracy_dictionary]
+    pickle.dump(my_ft_dicts, open("ewc_MLP_2.pkl", "wb"))
 #lenet_lr_dicts = [lenet_lr_training_error_dictionary, lenet_lr_validation_error_dictionary, lenet_lr_computation_time_dictionary, lenet_lr_inference_time_dictionary, lenet_lr_accuracy_dictionary]
 #pickle.dump(lenet_lr_dicts, open("Lenet_Dicts_50_epochs_small_batchnorm_adam.pkl", "wb"))
 
