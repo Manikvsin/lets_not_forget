@@ -30,15 +30,16 @@ def progress_bar(i, epochs, train_error, val_error, ewc_error_log, accuracy):
     print("\r[{}{}] Epoch Num {} Loss's Training:{:.6f} Validation:{:.6f} EWC:{:.6f} Accuracy:{:2.2f}".format("="*i, " "*(epochs - i), i, train_error, val_error, ewc_error_log, accuracy), end='')
 
 class EWC_train(object):
-    def __init__(self):
+    def __init__(self, load_file = None, debug=0):
         #self.use_gpu = torch.cuda.is_available()
         #if self.use_gpu:
         #    print("HEYYY CUDAAAA")
         self.use_gpu = False
+        self.debug = debug
         #set some hyperparams
         self.train_batch = 10
         self.val_batch = 10
-        self.lamda = 5
+        self.lamda = 10
         #IO size
         self.rows = 28
         self.cols = 28
@@ -56,8 +57,9 @@ class EWC_train(object):
         self.validation_error_dictionary = {}
         #create model
         self.layer_sizes = [self.input_size, 512,128,32,self.output_size] 
-        self.model = ewc_MLP(self.layer_sizes, dropout=False)
-        print(self.model)
+        self.model = ewc_MLP(self.layer_sizes, dropout=False, debug=self.debug)
+        if (self.debug):
+            print(self.model)
         self.criterion = nn.CrossEntropyLoss()
         self.opt = optim.SGD(self.model.parameters(), lr=0.05)
         #self.scheduler = torch.optim.lr_scheduler.MultiStepLR(self.opt, milestones=[10, 40], gamma=0.1)
@@ -75,8 +77,14 @@ class EWC_train(object):
         self.og_val_data = datasets.MNIST("MNIST_data", download=True, train=False, transform = data_transforms['val'])
         self.train_loader = DataLoader(self.og_train_data, batch_size=self.train_batch, shuffle=True)
         self.val_loader = DataLoader(self.og_val_data, batch_size=self.val_batch, shuffle=True)
+        if(load_file != None):
+            if (self.debug > 0):
+                print("loading state")
+            checkpoint = torch.load(load_file)
+            self.model.load_state_dict(checkpoint['state_dict'])
+
     
-    def train(self, save_model_file=os.path.join(save_path, "finetuned_alexnet.pt"), save_all=False):
+    def train(self, save_model_file=None, save_all=False, progress=True):
         for i in range(self.start_epoch + 1, self.epoch + 1):
             train_error = 0
             ewc_t = 0
@@ -94,12 +102,18 @@ class EWC_train(object):
                 except:
                     output_vector = self.model(input_data.view(input_data.size()[0], self.input_size))
                 batch_error = self.criterion(output_vector, g_label)
-                ewc_error = self.model.get_ewc_loss(self.lamda)
+                ewc_error = self.model.get_ewc_loss(lamda = self.lamda, debug=False)
+                
                 final_error = batch_error + ewc_error
+                if(self.debug > 10):
+                    print(i, batch, ewc_error.item(), final_error.item())
                 train_error += final_error.item()
                 ewc_t += ewc_error.item()
                 final_error.backward()
                 self.opt.step()
+                #if (batch > 2):
+                #   break
+
 
             self.model.eval()
             for batch,(v_data,v_label) in enumerate(self.val_loader):
@@ -128,7 +142,10 @@ class EWC_train(object):
             train_error = (1.0 * train_error) / (self.train_data_size)
             ewc_t = (1.0 * ewc_t) / (self.train_data_size)
             validation_error = (1.0 * validation_error) / (self.val_data_size)
-            progress_bar(i, self.epochs, train_error, val_error, ewc_t, accuracy)
+            if progress:
+                progress_bar(i, self.epochs, train_error, validation_error, ewc_t, accuracy)
+            if (self.debug >5):
+                print(i, train_error, validation_error, ewc_t, accuracy)
             #record stat
             self.accuracy_dictionary[i] = accuracy
             self.accuracy = accuracy
@@ -150,13 +167,15 @@ class EWC_train(object):
                     torch.save(model_dict, best_model_file)
                     self.better = 0
     def make_dataloaders(self, train_nums, val_nums):
-        train_idxs = get_labels_indices(self.og_train_data.train_labels, train_nums)
+        train_idxs = get_labels_indices(self.og_train_data.train_labels, train_nums) 
         self.train_data_size = len(train_idxs)
         self.train_loader =DataLoader(self.og_train_data, batch_size=self.train_batch, sampler=torch.utils.data.sampler.SubsetRandomSampler(train_idxs))
         
         val_idxs = get_labels_indices(self.og_val_data.test_labels, val_nums)
         self.val_data_size = len(val_idxs)
         self.val_loader = DataLoader(self.og_val_data, batch_size=self.val_batch, sampler=torch.utils.data.sampler.SubsetRandomSampler(val_idxs))
+        if (self.debug > 0):
+            print("Train idxs ", self.train_data_size, " Val _idxs ", self.val_data_size) 
 
 
     def run_experiments(self, exp_num):
@@ -186,26 +205,36 @@ class EWC_train(object):
             self.start_epoch = 0
             self.epoch = 20
             self.make_dataloaders(train_nums = [0,1,2,3], val_nums = [0,1,2,3])
-            self.train(save_model_file = os.path.join(save_path, "EWC_MLP_03.pt"))
+            self.train(save_model_file = os.path.join(save_path, "EWC_MLP_03_ewc.pt"))
             self.model.make_fisher_matrix(self.og_train_data, self.train_batch, prev_nums=[0,1,2,3])
             #4-6
             self.start_epoch = 20
             self.epoch = 40
             self.make_dataloaders(train_nums = [4,5,6], val_nums = [0,1,2,3,4,5,6])
-            self.train(save_model_file = os.path.join(save_path, "EWC_MLP_06.pt"))
+            self.train(save_model_file = os.path.join(save_path, "EWC_MLP_06_ewc.pt"))
             self.model.make_fisher_matrix(self.og_train_data, self.train_batch, prev_nums=[0,1,2,3,4,5,6])
             #7-9
             self.start_epoch = 40
             self.epoch = 60
             self.make_dataloaders(train_nums = [7,8,9], val_nums = [0,1,2,3,4,5,6,7,8,9])
-            self.train(save_model_file = os.path.join(save_path, "EWC_MLP_09.pt"))
+            self.train(save_model_file = os.path.join(save_path, "EWC_MLP_09_ewc.pt"))
+        elif (exp_num == 3): #debug fisher matrix
+            self.start_epoch = 21
+            self.epoch = 30
+            for param_group in self.opt.param_groups:
+                param_group['lr']=0.1
+            self.make_dataloaders(train_nums = [0,1,2,3], val_nums = [0,1,2,3])
+            self.make_dataloaders(train_nums = [0,1,2,3], val_nums = [4,5,6])
+            self.make_dataloaders(train_nums=[4,5,6], val_nums=range(7))
+            self.model.make_fisher_matrix(self.og_train_data, self.train_batch, prev_nums = range(4))
+            self.train(progress=True)
         
 
         
 
 if __name__ == '__main__':
-    a = EWC_train()
-    a.run_experiments(2)
+    a = EWC_train(load_file= os.path.join(save_path, "EWC_MLP_03.pt"), debug=1)
+    a.run_experiments(3)
     print("\n Finished")
     #train_error_dict = a.train_error_dictionary
     #val_error_dict = a.validation_error_dictionary

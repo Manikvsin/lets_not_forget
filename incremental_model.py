@@ -18,34 +18,63 @@ def get_labels_indices(target, label):
 
     return label_indices
 
-class ewc_MLP(nn.Module):
-    def __init__(self, layer_sizes,dropout = False, use_gpu=False, debug=False):
+class ewc_MLP_incremental(nn.Module):
+    def __init__(self, layer_sizes,dropout = False, use_gpu=False, debug=False, do_cwr=False, do_ewc=False):
         super(ewc_MLP, self).__init__()
         self.layers = nn.ModuleList([])
+        self.output_layers = nn.ModuleList([])
+        self.max_classes = self.layer_sizes
         self.size = len(layer_sizes)
         self.dropout = dropout
         self.use_gpu = use_gpu
         self.fisher_matrix = None
         self.prev_parameters = None
         self.layer_sizes = layer_sizes
-        for i in range(self.size-1):
-            if i == (self.size - 2):
-                layer = nn.Linear(layer_sizes[i], layer_sizes[i+1])
+        self.debug =debug
+        self.do_cwr = do_cwr
+        self.do_ewc = do_ewc
+        for i in range(self.size-2):
+            layer = nn.Linear(layer_sizes[i], layer_sizes[i+1])
+            self.layers.append(layer)
+            layer = nn.ReLU(inplace=True)
+            self.layers.append(layer)
+            if (self.dropout and i > 0):
+                layer = nn.Dropout()
                 self.layers.append(layer)
-                continue
+
+        penultimate_layer_size = layer_sizes[-2]
+        for i in range(self.max_classes):
+            layer = nn.Linear(penultimate_layer_size, 1)
+            self.output_layers.append(layer)
+
+    def set_numclasses(self, num_classes):
+        self.num_classes = num_classes
+        for i in range(max_classes):
+            if (i >= self.num_classes):
+                for j in self.output_layers[i].parameters():
+                    j.requires_grad = False
             else:
-                layer = nn.Linear(layer_sizes[i], layer_sizes[i+1])
-                self.layers.append(layer)
-                layer = nn.ReLU(inplace=True)
-                self.layers.append(layer)
-                if (self.dropout and i > 0):
-                    layer = nn.Dropout()
-                    self.layers.append(layer)
+                for j in self.output_layers[i].parameters():
+                    j.requires_grad = True
+
+
     def forward(self,x):
         mylambda = lambda x,layer:layer(x)
-        return reduce(mylambda, self.layers, x)
+        if len(self.layers) > 0:
+            penultimate_output = reduce(mylambda, self.layers, x)
+        else:
+            penultimate_output = x
+        for i in range(self.num_classes):
+            if (i == 0):
+                output = self.output_layers[i](penultimate_output)
+            else:
+                output = torch.cat((output, self.output_layers[i](penultimate_output)),1)
+        return output
+
 
     def make_fisher_matrix(self, previous_dataset, previous_batch_size, prev_nums):
+        if (self.debug > 0):
+            print("making_fisher")
         prev_idxs = get_labels_indices(previous_dataset.train_labels, prev_nums)
         loader = DataLoader(previous_dataset, batch_size=previous_batch_size, sampler=torch.utils.data.sampler.SubsetRandomSampler(prev_idxs))
         likelihoods = []
@@ -74,7 +103,7 @@ class ewc_MLP(nn.Module):
         return self.fisher_matrix
 
     def get_ewc_loss(self,lamda, debug=False):
-        try:
+       try 
             losses = torch.zeros(1)
             for n,p in self.named_parameters():
                 pp_fisher = self.fisher_matrix[n]
