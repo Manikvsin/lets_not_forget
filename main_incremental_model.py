@@ -262,7 +262,7 @@ class lenet_incremental(nn.Module):
 
         final_likelihoods = torch.cat(likelihoods)
         final_likelihood_avg = final_likelihoods.mean(0)
-        likelihood_grads = autograd.grad(final_likelihood_avg, self.dense_layers.parameters())
+        likelihood_grads = autograd.grad(final_likelihood_avg, (self.dense_layers.parameters(), self.features.parameters()))
         parameter_names = [n for n,p in self.layers.named_parameters()]
         self.fisher_matrix = {n:grads**2 for n,grads in zip(parameter_names, likelihood_grads)}
         self.prev_parameters = {n:p.data.clone() for n,p in self.layers.named_parameters()}
