@@ -87,6 +87,7 @@ class Incremental_train(object):
 
     
     def train(self, save_model_file=None, save_all=False, progress=True):
+        print("Starting training")
         for i in range(self.start_epoch + 1, self.epoch + 1):
             currset_validation_error = 0
             train_error = 0
@@ -157,7 +158,7 @@ class Incremental_train(object):
                 print(i, train_error, validation_error, ewc_t, accuracy)
             #record stat
             self.accuracy_dictionary[i] = accuracy
-            self.accuracy_dictionary_currset[i] = accuracy
+            self.accuracy_dictionary_currset[i] = currset_accuracy
             self.accuracy = accuracy
             self.train_error_dictionary[i] = train_error
             #self.ewc_train_error[i] = ewc_t
@@ -203,11 +204,10 @@ class Incremental_train(object):
             self.start_epoch = 0
             self.epoch = 20
             self.make_dataloaders(train_nums = [0,1,2,3], val_nums = [0,1,2,3])
-        output = y 
             self.model.set_numclasses_train(4)
             self.train(save_model_file = os.path.join(save_path, "MLP_incremental_03.pt"), save_all = True)
             self.accuracy_dictionary_list.append(self.accuracy_dictionary_currset)
-            #4-6those of you who have been wondering what I've been up to this semester, the answer is this! My senior design team is headed down to Kentucky tomorrow for our final client visit on Saturday, so it feels like an appropriate time to share this project video I edited together. Our client, Faurecia, is an international company that makes a quarter of all seating assemblies for the automotive industry. I'm really happy with how things went for o
+            #4-6
             self.start_epoch = 20
             self.epoch = 40
             self.make_dataloaders(train_nums = [4,5,6], val_nums = [0,1,2,3,4,5,6])

@@ -15,7 +15,7 @@ import os
 import matplotlib.pyplot as plt
 import argparse
 
-save_path = "EWC_MLP_models"
+save_path = "EWC_LeNet_models"
 
 def get_labels_indices(target, label):
     label_indices = []
@@ -26,10 +26,43 @@ def get_labels_indices(target, label):
 
     return label_indices
 
+
+def permute_input(input_tensor, permutation):
+    if permutation is None:
+        return input_tensor
+    
+    c,h,w = input_tensor.size()
+    input_tensor = input_tensor(c,-1)
+    input_tensor = input_tensor[:, permutation]
+    input_tensor = input_tensor.view(c,h,w)
+    return input_tensor
+    
+
+def get_dataset(permutation=None):
+    data_transforms = {
+        'train': transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Lambda(lambda x: permute_input(x, permutation))
+        ]),
+        'val': transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Lambda(lambda x: permute_input(x, permutation))
+        ]),
+    }
+
+
+    og_train_data = datasets.MNIST("MNIST_data", download=True, train=True, transform = data_transforms['train'])
+    og_val_data = datasets.MNIST("MNIST_data", download=True, train=False, transform = data_transforms['val'])
+    return og_train_data, og_val_data
+
+
+
+
+
 def progress_bar(i, epochs, train_error, val_error, ewc_error_log, accuracy): 
     print("\r[{}{}] Epoch Num {} Loss's Training:{:.6f} Validation:{:.6f} EWC:{:.6f} Accuracy:{:2.2f}".format("="*i, " "*(epochs - i), i, train_error, val_error, ewc_error_log, accuracy), end='')
 
-class Incremental_train(object):
+class Lenet_Incremental_train(object):
     def __init__(self, load_file = None, debug=0):
         #self.use_gpu = torch.cuda.is_available()
         #if self.use_gpu:
@@ -45,6 +78,7 @@ class Incremental_train(object):
         self.cols = 28
         self.input_size = self.rows*self.cols
         self.output_size = 10
+        self.random_inputs = 1
         #epochs number
         self.epochs = 60
         #some logging facilities
@@ -59,7 +93,7 @@ class Incremental_train(object):
         self.accuracy_dictionary_currset = {}
         #create model
         self.layer_sizes = [self.input_size, 512,128,32,self.output_size] 
-        self.model = MLP_incremental(self.layer_sizes, dropout=False, debug=self.debug)
+        self.model = lenet_incremental()
         if (self.debug):
             print(self.model)
         self.criterion = nn.CrossEntropyLoss()
@@ -67,14 +101,8 @@ class Incremental_train(object):
         #self.scheduler = torch.optim.lr_scheduler.MultiStepLR(self.opt, milestones=[10, 40], gamma=0.1)
 
         #create dataloader
-        data_transforms = {
-            'train': transforms.Compose([
-                transforms.ToTensor(),
-            ]),
-            'val': transforms.Compose([
-                transforms.ToTensor(),
-            ]),
-        }
+        np.random.seed(0)
+        self.permutations = [np.random.permutation(28*28) for x in range(self.random_inputs)]
         self.og_train_data = datasets.MNIST("MNIST_data", download=True, train=True, transform = data_transforms['train'])
         self.og_val_data = datasets.MNIST("MNIST_data", download=True, train=False, transform = data_transforms['val'])
         self.train_loader = DataLoader(self.og_train_data, batch_size=self.train_batch, shuffle=True)
@@ -101,10 +129,7 @@ class Incremental_train(object):
                 else:
                     input_data, g_label = Variable(data), Variable(label)
                 self.opt.zero_grad()
-                try:
-                    output_vector = self.model(input_data.view(self.train_batch, self.input_size))
-                except:
-                    output_vector = self.model(input_data.view(input_data.size()[0], self.input_size))
+                output_vector = self.model(input_data)
                 batch_error = self.criterion(output_vector, g_label)
                 ewc_error = self.model.get_ewc_loss(lamda = self.lamda, debug=False) 
                 final_error = batch_error + ewc_error
@@ -116,7 +141,6 @@ class Incremental_train(object):
                 self.opt.step()
                 #if (batch > 2):
                 #   break
-
             self.model.transfer_weights()
             self.model.eval()
             for batch,(v_data,v_label) in enumerate(self.val_loader):
@@ -125,10 +149,8 @@ class Incremental_train(object):
                     input_data, g_label = Variable(v_data.cuda()), Variable(v_label.cuda())
                 else:
                     input_data, g_label = Variable(v_data), Variable(v_label)
-                try:
-                    output_vector = self.model(input_data.view(self.train_batch, self.input_size))
-                except:
-                    output_vector = self.model(input_data.view(input_data.size()[0], self.input_size))
+                
+                output_vector = self.model(input_data)
                 val_error = self.criterion(output_vector, g_label)
                 validation_error += val_error.item()
                 dummy, predicted_output = torch.max(output_vector, 1)
@@ -157,7 +179,7 @@ class Incremental_train(object):
                 print(i, train_error, validation_error, ewc_t, accuracy)
             #record stat
             self.accuracy_dictionary[i] = accuracy
-            self.accuracy_dictionary_currset[i] = accuracy
+            self.accuracy_dictionary_currset[i] = currset_accuracy
             self.accuracy = accuracy
             self.train_error_dictionary[i] = train_error
             #self.ewc_train_error[i] = ewc_t
@@ -191,100 +213,112 @@ class Incremental_train(object):
             print("Train idxs ", self.train_data_size, " Val _idxs ", self.val_data_size) 
 
 
-    def run_experiments(self, exp_num):
+    def run_experiments(self, exp_num)https://en.wikipedia.org/wiki/Wayne_Chrebet:
         if (exp_num == 0):
             self.start_epoch = 0
             self.epoch = 60
             self.make_dataloaders(range(10), range(10))
             self.model.set_numclasses_train(10)
-            self.train(save_model_file = os.path.join(save_path, "OG_MLP_incremental.pt"))
+            self.train(save_model_file = os.path.join(save_path, "OG_LeNet_incremental.pt"))
+            self.accuracy_dictionary_list.append(self.accuracy_dictionary)
         elif (exp_num == 1):
+            self.epochs = 30
             #do 0 - 3, 4 - 6, 7 - 9
             self.start_epoch = 0
-            self.epoch = 20
+            self.epoch = 10
             self.make_dataloaders(train_nums = [0,1,2,3], val_nums = [0,1,2,3])
-        output = y 
             self.model.set_numclasses_train(4)
-            self.train(save_model_file = os.path.join(save_path, "MLP_incremental_03.pt"), save_all = True)
+            self.train(save_model_file = os.path.join(save_path, "LeNet_incremental_03.pt"), save_all = True)
             self.accuracy_dictionary_list.append(self.accuracy_dictionary_currset)
             #4-6those of you who have been wondering what I've been up to this semester, the answer is this! My senior design team is headed down to Kentucky tomorrow for our final client visit on Saturday, so it feels like an appropriate time to share this project video I edited together. Our client, Faurecia, is an international company that makes a quarter of all seating assemblies for the automotive industry. I'm really happy with how things went for o
-            self.start_epoch = 20
-            self.epoch = 40
+            self.start_epoch = 10
+            self.epoch = 20
             self.make_dataloaders(train_nums = [4,5,6], val_nums = [0,1,2,3,4,5,6])
             self.model.set_numclasses_train(7)
-            self.train(save_model_file = os.path.join(save_path, "MLP_incremental_06.pt"), save_all =True)
+            self.train(save_model_file = os.path.join(save_path, "LeNet_incremental_06.pt"), save_all =True)
             self.accuracy_dictionary_list.append(self.accuracy_dictionary_currset)
             #7-9
-            self.start_epoch = 40
-            self.epoch = 60
+            self.start_epoch = 20
+            self.epoch = 30
             self.make_dataloaders(train_nums = [7,8,9], val_nums = [0,1,2,3,4,5,6,7,8,9])
             self.model.set_numclasses_train(10)
-            self.train(save_model_file = os.path.join(save_path, "MLP_incremental_09.pt"), save_all=True)
+            self.train(save_model_file = os.path.join(save_path, "LeNet_incremental_09.pt"), save_all=True)
             self.accuracy_dictionary_list.append(self.accuracy_dictionary_currset)
             self.accuracy_dictionary_list.append(self.accuracy_dictionary)
         elif (exp_num == 2):
+            self.epochs = 30
             #do 0 - 3, 4 - 6, 7 - 9
             self.start_epoch = 0
-            self.epoch = 20
+            self.epoch = 10
             self.make_dataloaders(train_nums = [0,1,2,3], val_nums = [0,1,2,3])
             self.model.set_numclasses_train(4)
-            self.train(save_model_file = os.path.join(save_path, "MLP_incremental_03_cwr.pt"))
+            self.train(save_model_file = os.path.join(save_path, "LeNet_incremental_03_cwr.pt"))
             self.accuracy_dictionary_list.append(self.accuracy_dictionary_currset)
             self.model.fix_features()
             #4-6
-            self.start_epoch = 20
-            self.epoch = 40
+            self.start_epoch = 10
+            self.epoch = 20
             self.make_dataloaders(train_nums = [4,5,6], val_nums = [0,1,2,3,4,5,6])
             self.model.set_numclasses_train(7)
-            self.train(save_model_file = os.path.join(save_path, "MLP_incremental_06_cwr.pt"))
+            self.train(save_model_file = os.path.join(save_path, "LeNet_incremental_06_cwr.pt"))
             self.accuracy_dictionary_list.append(self.accuracy_dictionary_currset)
             #7-9
-            self.start_epoch = 40
-            self.epoch = 60
+            self.start_epoch = 20
+            self.epoch = 30
             self.make_dataloaders(train_nums = [7,8,9], val_nums = [0,1,2,3,4,5,6,7,8,9])
             self.model.set_numclasses_train(10)
-            self.train(save_model_file = os.path.join(save_path, "MLP_incremental_09_cwr.pt"))
+            self.train(save_model_file = os.path.join(save_path, "LeNet_incremental_09_cwr.pt"))
             self.accuracy_dictionary_list.append(self.accuracy_dictionary_currset)
             self.accuracy_dictionary_list.append(self.accuracy_dictionary)
         elif (exp_num == 3):
+            self.epochs = 30
             #do 0 - 3, 4 - 6, 7 - 9
             self.start_epoch = 0
-            self.epoch = 20
+            self.epoch = 10
             self.make_dataloaders(train_nums = [0,1,2,3], val_nums = [0,1,2,3])
             self.model.set_numclasses_train(4)
-            self.train(save_model_file = os.path.join(save_path, "MLP_incremental_03_cwr_ewc_{}.pt".format(self.lamda)))
+            self.train(save_model_file = os.path.join(save_path, "LeNet_incremental_03_cwr_ewc_{}.pt".format(self.lamda)))
             self.model.eval()
             self.model.make_fisher_matrix(self.og_train_data, self.train_batch, prev_nums = range(4))
             self.accuracy_dictionary_list.append(self.accuracy_dictionary_currset)
             #4-6
             self.model.train()
-            self.start_epoch = 20
-            self.epoch = 40
+            self.start_epoch = 10
+            self.epoch = 20
             self.make_dataloaders(train_nums = [4,5,6], val_nums = [0,1,2,3,4,5,6])
             self.model.set_numclasses_train(7)
-            self.train(save_model_file = os.path.join(save_path, "MLP_incremental_06_cwr_ewc_{}.pt".format(self.lamda)))
+            self.train(save_model_file = os.path.join(save_path, "LeNet_incremental_06_cwr_ewc_{}.pt".format(self.lamda)))
             self.model.eval()
             self.model.make_fisher_matrix(self.og_train_data, self.train_batch, prev_nums = range(7))
             self.accuracy_dictionary_list.append(self.accuracy_dictionary_currset)
             #7-9
             self.model.train()
-            self.start_epoch = 40
-            self.epoch = 60
+            self.start_epoch = 20
+            self.epoch = 30
             self.make_dataloaders(train_nums = [7,8,9], val_nums = [0,1,2,3,4,5,6,7,8,9])
             self.model.set_numclasses_train(10)
-            self.train(save_model_file = os.path.join(save_path, "MLP_incremental_09_cwr_ewc_{}.pt".format(self.lamda)))
+            self.train(save_model_file = os.path.join(save_path, "LeNet_incremental_09_cwr_ewc_{}.pt".format(self.lamda)))
             self.accuracy_dictionary_list.append(self.accuracy_dictionary_currset)
             self.accuracy_dictionary_list.append(self.accuracy_dictionary)
+        elif(exp_num == 4):
+            self.start_epoch = 0
+            self.epoch = 60
+            self.make_dataloaders(range(10), range(10))
+            self.model.set_numclasses_train(10)
+            self.train(save_model_file = os.path.join(save_path, "OG_LeNet_incremental.pt"))
+            self.accuracy_dictionary_list.append(self.accuracy_dictionary)
+            
+
         
 
         
 
 if __name__ == '__main__':
-    a = Incremental_train(debug=1)
+    a = Lenet_Incremental_train(debug=1)
     a.run_experiments(3)
     print("\n Finished")
     my_ft_dicts = [a.train_error_dictionary, a.validation_error_dictionary, a.accuracy_dictionary_list]
-    pickle.dump(my_ft_dicts, open("MLP_incremental_3.pkl", "wb"))
+    pickle.dump(my_ft_dicts, open("LeNet_incremental_3sp.pkl", "wb"))
 
 
 

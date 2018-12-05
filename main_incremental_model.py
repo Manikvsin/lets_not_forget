@@ -8,6 +8,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.autograd import Variable
 from torch import autograd
 from torchvision import models,utils,datasets,transforms
+from collections import OrderedDict
 
 def get_labels_indices(target, label):
     label_indices = []
@@ -155,25 +156,22 @@ class MLP_incremental(nn.Module):
 
 class lenet_incremental(nn.Module):
     def __init__(self,use_gpu=False, debug=False):
-        super(MLP_incremental, self).__init__()
+        super(lenet_incremental, self).__init__()
         self.output_train = nn.ModuleList([]) #the ones i train after initializing to 0
         self.output_fixed = nn.ModuleList([]) #the ones that are fixed for inference
         #for regularization
         self.fisher_matrix = None
         self.prev_parameters = None
         #define layer sizes:
-        self.layer_sizes = layer_sizes
         #create proxies for output layer
-        self.max_classes = self.layer_sizes[-1]
+        self.max_classes = 10
         self.prev_classes = 0
         self.curr_classes = 0
 
-        self.size = len(layer_sizes)
-        self.dropout = dropout
         self.use_gpu = use_gpu
         self.debug =debug
         self.features = nn.Sequential(OrderedDict([
-            ('conv1', nn.Conv2d(1, 6, 5, padding=0)),
+            ('conv1', nn.Conv2d(1, 6, kernel_size=(5,5), padding=2)),
             ('relu1', nn.ReLU()),
             ('pool1', nn.MaxPool2d(kernel_size=(2, 2), stride=2)),
             ('conv2', nn.Conv2d(6, 16, kernel_size=(5, 5), padding=0)),
@@ -199,6 +197,8 @@ class lenet_incremental(nn.Module):
             layer = nn.Linear(penultimate_layer_size, 1)
             for p in layer.parameters():
                 p.requires_grad = False
+            self.output_fixed.append(layer)
+
     def set_numclasses_train(self, num_classes, re_init=False):
         self.prev_classes = self.curr_classes
         self.curr_classes = num_classes
@@ -208,7 +208,6 @@ class lenet_incremental(nn.Module):
                     p.data.fill_(0)
                 if (i < self.curr_classes):
                     p.requires_grad = True
-            self.output_fixed.append(layer)
     
     def set_numclasses_train(self, num_classes, re_init=False):
         self.prev_classes = self.curr_classes
@@ -224,7 +223,8 @@ class lenet_incremental(nn.Module):
         y = torch.zeros(self.curr_classes)
         if self.training:
             penultimate_output = self.features(x)
-            penultimate_output = self.dense_layers(x)
+            penultimate_output = penultimate_output.view(penultimate_output.size(0), -1)
+            penultimate_output = self.dense_layers(penultimate_output)
             for i in range(self.curr_classes):
                 if (i == 0):
                     y = self.output_train[i](penultimate_output)
@@ -232,7 +232,8 @@ class lenet_incremental(nn.Module):
                     y = torch.cat((y, self.output_train[i](penultimate_output)),1)
         else:
             penultimate_output = self.features(x)
-            penultimate_output = self.dense_layers(x)
+            penultimate_output = penultimate_output.view(penultimate_output.size(0), -1)
+            penultimate_output = self.dense_layers(penultimate_output)
             for i in range(self.curr_classes):
                 if (i == 0):
                     y = self.output_fixed[i](penultimate_output)
@@ -248,9 +249,9 @@ class lenet_incremental(nn.Module):
         likelihoods = []
         for k, (i_data,label) in enumerate(loader):
             try:
-                data = i_data.view(previous_batch_size,self.layer_sizes[0])
+                data = i_data
             except:
-                data = i_data.view(i_data.size()[0], self.layer_sizes[0])
+                data = i_data
             data = Variable(data)
             label = Variable(label)
             previous_prediction = self.forward(data)
@@ -262,10 +263,18 @@ class lenet_incremental(nn.Module):
 
         final_likelihoods = torch.cat(likelihoods)
         final_likelihood_avg = final_likelihoods.mean(0)
-        likelihood_grads = autograd.grad(final_likelihood_avg, (self.dense_layers.parameters(), self.features.parameters()))
-        parameter_names = [n for n,p in self.layers.named_parameters()]
-        self.fisher_matrix = {n:grads**2 for n,grads in zip(parameter_names, likelihood_grads)}
-        self.prev_parameters = {n:p.data.clone() for n,p in self.layers.named_parameters()}
+        
+        features_likelihood_grads = autograd.grad(final_likelihood_avg, self.features.parameters(), retain_graph=True)
+        dense_likelihood_grads = autograd.grad(final_likelihood_avg, self.dense_layers.parameters())
+        
+        features_parameter_names = [n for n,p in self.features.named_parameters()]
+        dense_parameter_names = [n for n,p in self.dense_layers.named_parameters()]
+        
+        self.features_fisher_matrix = {n:grads**2 for n,grads in zip(features_parameter_names, features_likelihood_grads)}
+        self.dense_fisher_matrix = {n:grads**2 for n,grads in zip(dense_parameter_names, dense_likelihood_grads)}
+        
+        self.features_prev_parameters = {n:p.data.clone() for n,p in self.features.named_parameters()}
+        self.dense_prev_parameters = {n:p.data.clone() for n,p in self.dense_layers.named_parameters()}
 
     def get_fisher_matrix(self):
         return self.fisher_matrix
@@ -279,17 +288,26 @@ class lenet_incremental(nn.Module):
 
     #for enabling purely CWR
     def fix_features(self):
-        for p in self.layers.parameters():
+        for p in self.features.parameters():
+            p.requires_grad=False
+        for p in self.dense_layers.parameters():
             p.requires_grad=False
 
     def get_ewc_loss(self,lamda, debug=False):
         try: 
             losses = torch.zeros(1)
-            for n,p in self.layers.named_parameters():
-                pp_fisher = self.fisher_matrix[n]
-                pp = self.prev_parameters[n]
+            for n,p in self.features.named_parameters():
+                pp_fisher = self.features_fisher_matrix[n]
+                pp = self.features_prev_parameters[n]
                 loss = (pp_fisher*((p - pp)**2)).sum()
                 losses = losses + loss
+            
+            for n,p in self.dense_layers.named_parameters():
+                pp_fisher = self.dense_fisher_matrix[n]
+                pp = self.dense_prev_parameters[n]
+                loss = (pp_fisher*((p - pp)**2)).sum()
+                losses = losses + loss
+
             return (Variable((lamda/2)*(losses)))
         except: 
             return (Variable(torch.zeros(1)))
